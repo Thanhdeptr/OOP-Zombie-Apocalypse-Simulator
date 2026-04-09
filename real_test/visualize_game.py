@@ -1,6 +1,13 @@
 import time
 
-from zombie_apocalypse_oop import Citizen, Soldier, Zombie, get_input_data
+from zombie_apocalypse_oop import (
+    Citizen,
+    GameContext,
+    Phase,
+    Soldier,
+    Zombie,
+    get_input_data,
+)
 
 
 # ANSI colors for terminal rendering.
@@ -57,13 +64,14 @@ def main() -> None:
     # (id, x, y, speed) of infected human snapshots.
     pending_infected: list[tuple[int, int, int, int]] = []
     pending_human_ids: set[int] = set()
+    ctx = GameContext(human_array, zombie_array, pending_infected, pending_human_ids)
 
     # Show initial state before any action.
     initial_map = build_map(human_array, zombie_array)
     render_map(initial_map, turn, len(human_array), len(zombie_array))
     time.sleep(1.5)
 
-    while turn < m and (human_array or zombie_array):
+    while turn < m and human_array and zombie_array:
         turn += 1
 
         # Apply infections from previous turn.
@@ -71,25 +79,30 @@ def main() -> None:
         if pending_infected:
             pending_ids = {pid for pid, _, _, _ in pending_infected}
             human_array = [h for h in human_array if h.id not in pending_ids]
+            ctx.human_array = human_array
             for pid, px, py, ps in pending_infected:
                 new_zombies.append(Zombie(pid, 3, px, py, ps))
             zombie_array.extend(new_zombies)
             pending_infected.clear()
             pending_human_ids.clear()
 
+        if not human_array or not zombie_array:
+            current_map = build_map(human_array, zombie_array)
+            render_map(current_map, turn, len(human_array), len(zombie_array))
+            time.sleep(1.5)
+            break
+
         # 1) Citizens run.
         for h in human_array:
-            if isinstance(h, Citizen):
-                h.run(human_array, zombie_array)
+            h.take_turn(Phase.CITIZEN_MOVE, ctx)
 
         # 2) Soldiers attack.
         for h in human_array:
-            if isinstance(h, Soldier):
-                h.attack(zombie_array)
+            h.take_turn(Phase.SOLDIER_ATTACK, ctx)
 
         # 3) Zombies hunt.
         for z in list(zombie_array):
-            z.hunt(human_array, zombie_array, pending_infected, pending_human_ids)
+            z.take_turn(Phase.ZOMBIE_HUNT, ctx)
 
         current_map = build_map(human_array, zombie_array)
         render_map(current_map, turn, len(human_array), len(zombie_array))
