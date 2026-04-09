@@ -1,101 +1,25 @@
 
 
 import math
-import sys
 from collections.abc import Callable
-
-# If you run with: python zombie_apocalypse_oop.py path/to/input.txt
-# (or visualize_game.py input.txt), lines are read from that file instead of stdin.
-_INPUT_LINES: list[str] | None = None
-_input_line_index: int = 0
-
-
-def _reset_input_from_argv() -> None:
-    global _INPUT_LINES, _input_line_index
-    _input_line_index = 0
-    if len(sys.argv) > 1:
-        path = sys.argv[1]
-        with open(path, encoding="utf-8") as f:
-            _INPUT_LINES = [line.rstrip("\n\r") for line in f]
-        print(f"[Input] Doc tu file: {path} ({len(_INPUT_LINES)} dong)")
-    else:
-        _INPUT_LINES = None
+from dataclasses import dataclass
+from enum import Enum
+from io_utils import is_file_input_mode, read_line, reset_input_from_argv
+from movement_utils import occupied_cells, pick_step_with_wall_slide
 
 
-def _read_line(prompt: str = "") -> str:
-    global _input_line_index
-    if _INPUT_LINES is not None:
-        if _input_line_index >= len(_INPUT_LINES):
-            raise EOFError(
-                f"Het du lieu file input (can them dong sau dong {_input_line_index})"
-            )
-        if prompt:
-            print(prompt, end="", flush=True)
-        line = _INPUT_LINES[_input_line_index]
-        _input_line_index += 1
-        if prompt:
-            print(line)
-        return line
-    return input(prompt) if prompt else input()
+class Phase(str, Enum):
+    CITIZEN_MOVE = "citizen_move"
+    SOLDIER_ATTACK = "soldier_attack"
+    ZOMBIE_HUNT = "zombie_hunt"
 
 
-def _occupied_cells(
-    human_array: list,
-    zombie_array: list,
-    exclude_id: int,
-) -> set[tuple[int, int]]:
-    cells: set[tuple[int, int]] = set()
-    for h in human_array:
-        if h.id != exclude_id and 0 <= h.x < 20 and 0 <= h.y < 20:
-            cells.add((h.x, h.y))
-    for z in zombie_array:
-        if z.id != exclude_id and 0 <= z.x < 20 and 0 <= z.y < 20:
-            cells.add((z.x, z.y))
-    return cells
-
-
-def _pick_step_with_wall_slide(
-    x: int,
-    y: int,
-    step_x: int,
-    step_y: int,
-    occupied: set[tuple[int, int]],
-    score: Callable[[int, int], int],
-    *,
-    maximize: bool,
-) -> tuple[int, int] | None:
-    """
-    Prefer one step (step_x, step_y). If out of map or cell taken, pick the best
-    legal king-move (including sliding along the wall) by score.
-    """
-    px, py = x + step_x, y + step_y
-    if 0 <= px < 20 and 0 <= py < 20 and (px, py) not in occupied:
-        return px, py
-
-    candidates: list[tuple[int, int]] = []
-
-    tx = min(19, max(0, x + step_x))
-    if (tx, y) != (x, y) and 0 <= tx < 20 and (tx, y) not in occupied:
-        candidates.append((tx, y))
-
-    ty = min(19, max(0, y + step_y))
-    if (x, ty) != (x, y) and 0 <= ty < 20 and (x, ty) not in occupied:
-        candidates.append((x, ty))
-
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            if dx == 0 and dy == 0:
-                continue
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < 20 and 0 <= ny < 20 and (nx, ny) not in occupied:
-                candidates.append((nx, ny))
-
-    if not candidates:
-        return None
-
-    if maximize:
-        return max(candidates, key=lambda p: score(p[0], p[1]))
-    return min(candidates, key=lambda p: score(p[0], p[1]))
+@dataclass
+class GameContext:
+    human_array: list
+    zombie_array: list
+    pending_infected: list[tuple[int, int, int, int]]
+    pending_human_ids: set[int]
 
 
 class Object:
@@ -105,6 +29,36 @@ class Object:
         self.x = x
         self.y = y
         self.s = s
+        self._alive = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def mark_dead(self) -> None:
+        self._alive = False
+
+    def try_move(
+        self,
+        human_array: list,
+        zombie_array: list,
+        step_x: int,
+        step_y: int,
+        score: Callable[[int, int], int],
+        *,
+        maximize: bool,
+    ) -> bool:
+        occupied = occupied_cells(human_array, zombie_array, self.id)
+        chosen = pick_step_with_wall_slide(
+            self.x, self.y, step_x, step_y, occupied, score, maximize=maximize
+        )
+        if chosen is None:
+            return False
+        self.x, self.y = chosen
+        return True
+
+    def take_turn(self, phase: Phase, ctx: GameContext) -> int:
+        # Default: this entity does not act in this phase.
+        return 0
 
 
 class Soldier(Object):
@@ -131,6 +85,11 @@ class Soldier(Object):
             del zombie_array[idx]
 
         return kill_count
+
+    def take_turn(self, phase: Phase, ctx: GameContext) -> int:
+        if phase == Phase.SOLDIER_ATTACK:
+            return self.attack(ctx.zombie_array)
+        return 0
 
 
 
@@ -172,20 +131,27 @@ class Citizen(Object):
             step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
             step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
 
-            occupied = _occupied_cells(human_array, zombie_array, self.id)
-
             def score_flee(nx: int, ny: int, zz: Zombie = nearest) -> int:
                 return (nx - zz.x) ** 2 + (ny - zz.y) ** 2
 
-            chosen = _pick_step_with_wall_slide(
-                self.x, self.y, step_x, step_y, occupied, score_flee, maximize=True
+            moved = self.try_move(
+                human_array,
+                zombie_array,
+                step_x,
+                step_y,
+                score_flee,
+                maximize=True,
             )
-            if chosen is None:
+            if not moved:
                 break
-            self.x, self.y = chosen
             moved_any = True
 
         return 1 if moved_any else 0
+
+    def take_turn(self, phase: Phase, ctx: GameContext) -> int:
+        if phase == Phase.CITIZEN_MOVE:
+            return self.run(ctx.human_array, ctx.zombie_array)
+        return 0
 
 
 class Zombie(Object):
@@ -205,20 +171,34 @@ class Zombie(Object):
         if not human_array:
             return 0
 
+        # Among soldiers with Euclidean distance <= self.s, prefer higher lvl;
+        # tie-break by smaller distance. Otherwise fall back to nearest human (any type).
+        s2 = self.s * self.s
+
         def nearest_target() -> tuple[int, Soldier | Citizen] | None:
-            best_i = -1
-            best_d2: int | None = None
+            candidates: list[tuple[int, Soldier | Citizen, int]] = []
             for i in range(len(human_array)):
                 if human_array[i].id in pending_human_ids:
                     continue
                 h = human_array[i]
                 d2 = (h.x - self.x) ** 2 + (h.y - self.y) ** 2
-                if best_d2 is None or d2 < best_d2:
-                    best_d2 = d2
-                    best_i = i
-            if best_i == -1:
+                candidates.append((i, h, d2))
+            if not candidates:
                 return None
-            return best_i, human_array[best_i]
+
+            soldiers_in_range: list[tuple[int, Soldier, int]] = []
+            for i, h, d2 in candidates:
+                if isinstance(h, Soldier) and d2 <= s2:
+                    soldiers_in_range.append((i, h, d2))
+
+            if soldiers_in_range:
+                best_i, best_h, _ = max(
+                    soldiers_in_range, key=lambda t: (t[1].lvl, -t[2])
+                )
+                return best_i, best_h
+
+            best_i, best_h, _ = min(candidates, key=lambda t: t[2])
+            return best_i, best_h
 
         nt = nearest_target()
         if nt is None:
@@ -252,25 +232,37 @@ class Zombie(Object):
             step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
             step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
 
-            occupied = _occupied_cells(human_array, zombie_array, self.id)
-
             def score_chase(nx: int, ny: int, tt: Soldier | Citizen = target) -> int:
                 return (nx - tt.x) ** 2 + (ny - tt.y) ** 2
 
-            chosen = _pick_step_with_wall_slide(
-                self.x, self.y, step_x, step_y, occupied, score_chase, maximize=False
+            moved = self.try_move(
+                human_array,
+                zombie_array,
+                step_x,
+                step_y,
+                score_chase,
+                maximize=False,
             )
-            if chosen is None:
+            if not moved:
                 break
-            self.x, self.y = chosen
             moved_any = True
 
         return 1 if moved_any else 0
 
+    def take_turn(self, phase: Phase, ctx: GameContext) -> int:
+        if phase == Phase.ZOMBIE_HUNT:
+            return self.hunt(
+                ctx.human_array,
+                ctx.zombie_array,
+                ctx.pending_infected,
+                ctx.pending_human_ids,
+            )
+        return 0
+
 
 def _read_n_m() -> tuple[int, int]:
     while True:
-        line = _read_line().strip()
+        line = read_line().strip()
         parts = line.split()
         if len(parts) != 2:
             print("Nhap sai. Dung dinh dang: [n] [m] (2 so nguyen). Vi du: 3 10")
@@ -289,9 +281,9 @@ def _read_n_m() -> tuple[int, int]:
 
 def _read_entity_line(i: int) -> list[str]:
     while True:
-        line = _read_line(f"Nhap ca the thu {i + 1}: ").strip()
+        line = read_line(f"Nhap ca the thu {i + 1}: ").strip()
         if not line:
-            if _INPUT_LINES is not None:
+            if is_file_input_mode():
                 raise ValueError(
                     f"Dong trong trong file input (ca the thu {i + 1}). Kiem tra file."
                 )
@@ -301,7 +293,7 @@ def _read_entity_line(i: int) -> list[str]:
 
 
 def get_input_data():
-    _reset_input_from_argv()
+    reset_input_from_argv()
 
     # Map 20x20
     game_map: list[list[int | None]] = [[None for _ in range(20)] for _ in range(20)]
@@ -405,8 +397,9 @@ def main():
     game_map, turn, n, m, objects, human_array, zombie_array = get_input_data()
     pending_infected: list[tuple[int, int, int, int]] = []
     pending_human_ids: set[int] = set()
+    ctx = GameContext(human_array, zombie_array, pending_infected, pending_human_ids)
 
-    while turn < m and human_array:
+    while turn < m and human_array and zombie_array:
         turn += 1
 
         # Apply infections from previous turn:
@@ -417,6 +410,7 @@ def main():
             # Remove humans that were marked infected in previous turn.
             pending_ids = {pid for pid, _, _, _ in pending_infected}
             human_array = [h for h in human_array if h.id not in pending_ids]
+            ctx.human_array = human_array
 
             # Convert victims to zombies using stored snapshot (id, x, y, s).
             for pid, px, py, ps in pending_infected:
@@ -426,20 +420,23 @@ def main():
             pending_infected.clear()
             pending_human_ids.clear()
 
+        # Stop immediately if one side was wiped out (e.g. last human just turned).
+        if not human_array or not zombie_array:
+            print(f"Turn {turn}: humans={len(human_array)}, zombies={len(zombie_array)}")
+            break
+
         # Citizens run first.
         for h in human_array:
-            if isinstance(h, Citizen):
-                h.run(human_array, zombie_array)
+            h.take_turn(Phase.CITIZEN_MOVE, ctx)
 
         # Soldiers attack after citizens move.
         for h in human_array:
-            if isinstance(h, Soldier):
-                h.attack(zombie_array)
+            h.take_turn(Phase.SOLDIER_ATTACK, ctx)
 
         # Zombies hunt and may infect humans.
         current_zombies = list(zombie_array)
         for z in current_zombies:
-            z.hunt(human_array, zombie_array, pending_infected, pending_human_ids)
+            z.take_turn(Phase.ZOMBIE_HUNT, ctx)
 
         # Rebuild map 20x20 from current living entities.
         game_map = [[None for _ in range(20)] for _ in range(20)]
