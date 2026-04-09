@@ -35,7 +35,7 @@ class Soldier(Object):
         for idx in reversed(in_range_indexes[:kill_count]):
             del zombie_array[idx]
 
-        return 0
+        return kill_count
 
 
 
@@ -43,6 +43,35 @@ class Citizen(Object):
     def __init__(self, id: int, type: int, x: int, y: int, s: int, vision: int):
         super().__init__(id, 2, x, y, s)
         self.v = vision
+
+    def run(self, zombie_array: list["Zombie"]) -> int:
+        # 0: no zombie in vision, 1: moved
+        if not zombie_array:
+            return 0
+
+        nearest: Zombie | None = None
+        best_dist2: int | None = None
+        vision2 = self.v * self.v
+
+        # Find nearest zombie inside citizen vision.
+        for z in zombie_array:
+            dist2 = (z.x - self.x) ** 2 + (z.y - self.y) ** 2
+            if dist2 <= vision2 and (best_dist2 is None or dist2 < best_dist2):
+                best_dist2 = dist2
+                nearest = z
+
+        if nearest is None:
+            return 0
+
+        # Move one step away from nearest zombie (diagonal or straight).
+        dx = self.x - nearest.x
+        dy = self.y - nearest.y
+        step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+        step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+
+        self.x = min(19, max(0, self.x + step_x))
+        self.y = min(19, max(0, self.y + step_y))
+        return 1
 
 
 class Zombie(Object):
@@ -52,21 +81,27 @@ class Zombie(Object):
     def hunt(
         self,
         human_array: list[Soldier | Citizen],
-        pending_zombies: list["Zombie"],
+        pending_infected: list[tuple[int, int, int, int]],
+        pending_human_ids: set[int],
     ) -> int:
         # 0: no target, 1: moved, 2: infected target
         if not human_array:
             return 0
 
         # Find nearest target with squared distance (faster than sqrt).
-        target_idx = 0
-        best_dist2 = (human_array[0].x - self.x) ** 2 + (human_array[0].y - self.y) ** 2
-        for i in range(1, len(human_array)):
+        target_idx = -1
+        best_dist2: int | None = None
+        for i in range(len(human_array)):
+            if human_array[i].id in pending_human_ids:
+                continue
             h = human_array[i]
             dist2 = (h.x - self.x) ** 2 + (h.y - self.y) ** 2
-            if dist2 < best_dist2:
+            if best_dist2 is None or dist2 < best_dist2:
                 best_dist2 = dist2
                 target_idx = i
+
+        if target_idx == -1:
+            return 0
 
         target = human_array[target_idx]
         dx = target.x - self.x
@@ -74,8 +109,9 @@ class Zombie(Object):
 
         # If target is in neighboring area (Chebyshev distance <= 1), infect now.
         if abs(dx) <= 1 and abs(dy) <= 1:
-            infected = human_array.pop(target_idx)
-            pending_zombies.append(Zombie(infected.id, 3, infected.x, infected.y, infected.s))
+            # Store snapshot of victim data for next-turn conversion.
+            pending_infected.append((target.id, target.x, target.y, target.s))
+            pending_human_ids.add(target.id)
             return 2
 
         # Move exactly one step toward target (diagonal or straight).
@@ -215,7 +251,54 @@ def get_input_data():
 
 def main():
     game_map, turn, n, m, objects, human_array, zombie_array = get_input_data()
+    pending_infected: list[tuple[int, int, int, int]] = []
+    pending_human_ids: set[int] = set()
 
+    while turn < m and human_array:
+        turn += 1
+
+        # Apply infections from previous turn:
+        # - pop humans by recorded indexes
+        # - convert them into zombies now (deferred infection)
+        new_zombies: list[Zombie] = []
+        if pending_infected:
+            # Remove humans that were marked infected in previous turn.
+            pending_ids = {pid for pid, _, _, _ in pending_infected}
+            human_array = [h for h in human_array if h.id not in pending_ids]
+
+            # Convert victims to zombies using stored snapshot (id, x, y, s).
+            for pid, px, py, ps in pending_infected:
+                new_zombies.append(Zombie(pid, 3, px, py, ps))
+            zombie_array.extend(new_zombies)
+
+            pending_infected.clear()
+            pending_human_ids.clear()
+
+        # Citizens run first.
+        for h in human_array:
+            if isinstance(h, Citizen):
+                h.run(zombie_array)
+
+        # Soldiers attack after citizens move.
+        for h in human_array:
+            if isinstance(h, Soldier):
+                h.attack(zombie_array)
+
+        # Zombies hunt and may infect humans.
+        current_zombies = list(zombie_array)
+        for z in current_zombies:
+            z.hunt(human_array, pending_infected, pending_human_ids)
+
+        # Rebuild map 20x20 from current living entities.
+        game_map = [[None for _ in range(20)] for _ in range(20)]
+        for h in human_array:
+            if 0 <= h.x < 20 and 0 <= h.y < 20:
+                game_map[h.y][h.x] = h.id
+        for z in zombie_array:
+            if 0 <= z.x < 20 and 0 <= z.y < 20:
+                game_map[z.y][z.x] = z.id
+
+        print(f"Turn {turn}: humans={len(human_array)}, zombies={len(zombie_array)}")
 
 
 
